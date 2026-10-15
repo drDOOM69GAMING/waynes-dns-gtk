@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Wayne's DNS Encryptor
+GenericName=DNS-over-TLS Manager
+Comment=Enable, verify and leak-test DNS-over-TLS
+Exec=waynes-dns-gtk
+Icon=network-wired
+Terminal=false
+Categories=Network;Security;Settings;
+Keywords=DNS;DoT;DNS-over-TLS;privacy;security;encryption;
+StartupNotify=true

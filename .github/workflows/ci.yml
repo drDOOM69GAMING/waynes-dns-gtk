@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build & test (Arch / GTK4)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      # The target is CachyOS (Arch-based), and the crate enables the GTK
+      # `v4_24` feature, so we build inside a rolling Arch container rather
+      # than on the (older-GTK) Ubuntu runner image.
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            base-devel pkgconf gtk4 rust git nodejs
+
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+          pkg-config --modversion gtk4
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --locked
