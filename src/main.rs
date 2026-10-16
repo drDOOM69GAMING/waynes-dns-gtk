@@ -188,6 +188,11 @@ fn main() {
                     format!("{dns4} {dns6}")
                 };
                 println!("# Provider: {}\n", prov.label);
+                println!(
+                    "# Families: IPv4 {} server(s), IPv6 {} server(s)",
+                    prov.v4.len(),
+                    prov.v6.len()
+                );
                 println!("# {}", privileged::RESOLVED_DROPIN);
                 print!("{}", privileged::resolved_dropin(&line));
                 println!("\n# NetworkManager args per connection (example UUID):");
@@ -209,18 +214,18 @@ fn main() {
                     exit(2);
                 });
                 println!("Provider: {}", prov.label);
-                let v4 = resolvers::filter_reachable(&prov.v4, std::time::Duration::from_secs(5));
-                let v6 = resolvers::filter_reachable(&prov.v6, std::time::Duration::from_secs(5));
-                for (label, all, ok) in [("IPv4", &prov.v4, &v4), ("IPv6", &prov.v6, &v6)] {
-                    println!("{label}: {}/{} reachable", ok.len(), all.len());
-                    for s in all {
-                        let up = ok.iter().any(|o| o.ip == s.ip);
-                        println!(
-                            "   [{}] {} ({})",
-                            if up { "OK  " } else { "DEAD" },
-                            s.ip,
-                            s.sni
-                        );
+                let v4 = resolvers::probe_servers(&prov.v4, std::time::Duration::from_secs(5));
+                let v6 = resolvers::probe_servers(&prov.v6, std::time::Duration::from_secs(5));
+                for (label, probes) in [("IPv4", &v4), ("IPv6", &v6)] {
+                    let reachable = probes.iter().filter(|p| p.result.is_ok()).count();
+                    println!("{label}: {reachable}/{} reachable", probes.len());
+                    for p in probes.iter() {
+                        match &p.result {
+                            Ok(()) => println!("   [OK  ] {} ({})", p.server.ip, p.server.sni),
+                            Err(reason) => {
+                                println!("   [DEAD] {} ({}): {reason}", p.server.ip, p.server.sni);
+                            }
+                        }
                     }
                 }
                 exit(0);

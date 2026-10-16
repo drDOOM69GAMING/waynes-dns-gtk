@@ -14,8 +14,10 @@ use gtk4::{
 };
 
 use crate::leak::{self, Severity};
-use crate::resolvers::{all_providers, filter_reachable, DnsServer};
-use crate::system::{default_route, field, link_status, run_cmd, run_privileged_self};
+use crate::resolvers::{all_providers, probe_servers, ProbeOutcome};
+use crate::system::{
+    default_route, field, field_wrapped, link_status, run_cmd, run_privileged_self,
+};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -70,7 +72,7 @@ pub fn status_text() -> String {
         }
     }
     if !gw.is_empty() {
-        let servers = field(&block, "DNS Servers:").unwrap_or("");
+        let servers = field_wrapped(&block, "DNS Servers:").unwrap_or_default();
         if servers
             .split_whitespace()
             .any(|s| s.split('#').next() == Some(gw.as_str()))
@@ -392,10 +394,10 @@ pub fn build_ui(app: &gtk4::Application) -> App {
                     .find(|p| p.key == key)
                     .unwrap_or_else(|| all_providers()[0].clone());
                 let _ = tx.send(Msg::Log(format!("Testing DoT/853 for {} ...", prov.label)));
-                let v4 = filter_reachable(&prov.v4, PROBE_TIMEOUT);
-                let v6 = filter_reachable(&prov.v6, PROBE_TIMEOUT);
-                report_group(&tx, "IPv4", &prov.v4, &v4);
-                report_group(&tx, "IPv6", &prov.v6, &v6);
+                let v4 = probe_servers(&prov.v4, PROBE_TIMEOUT);
+                let v6 = probe_servers(&prov.v6, PROBE_TIMEOUT);
+                report_group(&tx, "IPv4", &v4);
+                report_group(&tx, "IPv6", &v6);
                 let _ = tx.send(Msg::Done);
             });
         }
@@ -497,18 +499,36 @@ pub fn build_ui(app: &gtk4::Application) -> App {
                     .unwrap_or_else(|| all_providers()[0].clone());
                 let _ = tx.send(Msg::Log(format!("Provider: {}", prov.label)));
                 let _ = tx.send(Msg::Log("Checking which servers are reachable...".into()));
-                let v4 = filter_reachable(&prov.v4, PROBE_TIMEOUT);
-                let v6 = filter_reachable(&prov.v6, PROBE_TIMEOUT);
+                let v4_probe = probe_servers(&prov.v4, PROBE_TIMEOUT);
+                let v6_probe = probe_servers(&prov.v6, PROBE_TIMEOUT);
+                report_group(&tx, "IPv4", &v4_probe);
+                report_group(&tx, "IPv6", &v6_probe);
 
-                if v4.is_empty() && v6.is_empty() {
+                // Stop only if absolutely nothing answered; otherwise configure
+                // every server, reachable or not. A transient outage in one
+                // family (for example IPv6 before the next router
+                // advertisement) then cannot drop that family's DNS, and
+                // resolved simply fails over to the family that is up.
+                let any_reachable = v4_probe
+                    .iter()
+                    .chain(v6_probe.iter())
+                    .any(|p| p.result.is_ok());
+                if !any_reachable {
                     let _ = tx.send(Msg::Log(
                         "ERROR: no reachable DNS-over-TLS server — nothing changed.".into(),
                     ));
                     let _ = tx.send(Msg::Done);
                     return;
                 }
-                report_group(&tx, "IPv4", &prov.v4, &v4);
-                report_group(&tx, "IPv6", &prov.v6, &v6);
+                for (label, probes) in [("IPv4", &v4_probe), ("IPv6", &v6_probe)] {
+                    if probes.iter().all(|p| p.result.is_err()) {
+                        let _ = tx.send(Msg::Log(format!(
+                            "Note: no {label} server answered; configuring {label} anyway in case the outage is temporary."
+                        )));
+                    }
+                }
+                let v4 = prov.v4.clone();
+                let v6 = prov.v6.clone();
 
                 let conns: Vec<String> = if all {
                     wired_wifi_uuids()
@@ -530,6 +550,18 @@ pub fn build_ui(app: &gtk4::Application) -> App {
 
                 let dns4: Vec<String> = v4.iter().map(|s| format!("{}#{}", s.ip, s.sni)).collect();
                 let dns6: Vec<String> = v6.iter().map(|s| format!("{}#{}", s.ip, s.sni)).collect();
+
+                let family = match (dns4.is_empty(), dns6.is_empty()) {
+                    (false, false) => "IPv4 + IPv6",
+                    (false, true) => "IPv4 only",
+                    (true, false) => "IPv6 only",
+                    (true, true) => "neither",
+                };
+                let _ = tx.send(Msg::Log(format!(
+                    "Applying {family} DNS servers (IPv4: {}, IPv6: {}).",
+                    dns4.len(),
+                    dns6.len()
+                )));
 
                 let mut args: Vec<String> = vec![
                     "--apply-privileged".into(),
@@ -618,16 +650,27 @@ pub fn build_ui(app: &gtk4::Application) -> App {
     App { window }
 }
 
-fn report_group(tx: &mpsc::Sender<Msg>, label: &str, all: &[DnsServer], ok: &[DnsServer]) {
+fn report_group(tx: &mpsc::Sender<Msg>, label: &str, probes: &[ProbeOutcome]) {
+    let reachable = probes.iter().filter(|p| p.result.is_ok()).count();
     let _ = tx.send(Msg::Log(format!(
-        "{label}: {}/{} reachable",
-        ok.len(),
-        all.len()
+        "{label}: {reachable}/{} reachable",
+        probes.len()
     )));
-    for s in all {
-        let reachable = ok.iter().any(|o| o.ip == s.ip);
-        let mark = if reachable { "OK  " } else { "DEAD" };
-        let _ = tx.send(Msg::Log(format!("   [{mark}] {}  ({})", s.ip, s.sni)));
+    for p in probes {
+        match &p.result {
+            Ok(()) => {
+                let _ = tx.send(Msg::Log(format!(
+                    "   [OK  ] {}  ({})",
+                    p.server.ip, p.server.sni
+                )));
+            }
+            Err(reason) => {
+                let _ = tx.send(Msg::Log(format!(
+                    "   [DEAD] {}  ({}): {reason}",
+                    p.server.ip, p.server.sni
+                )));
+            }
+        }
     }
 }
 
@@ -648,7 +691,7 @@ pub fn verify_lines() -> Vec<String> {
         _ => out.push("  [!!] DNS-over-TLS not shown as enforced".to_string()),
     }
 
-    let servers = field(&block, "DNS Servers:").unwrap_or("").to_string();
+    let servers = field_wrapped(&block, "DNS Servers:").unwrap_or_default();
     if !gw.is_empty()
         && servers
             .split_whitespace()

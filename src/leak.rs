@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use crate::system::{default_route, field, link_status, run_cmd};
+use crate::system::{default_route, field, field_wrapped, link_status, run_cmd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -405,52 +405,57 @@ pub fn leak_test(provider: &str) -> Vec<LeakCheck> {
         },
     ));
 
+    // If the default route cannot be determined we still run the checks that do
+    // not need it (live sockets + egress identity) instead of bailing out.
+    let mut dot_on = false;
+    let mut dot_on_known = false;
+
     if iface.is_empty() {
         checks.push(LeakCheck::new(
             "Default route",
             Severity::Warn,
             "no default-route interface found".to_string(),
         ));
-        return checks;
+    } else {
+        let block = link_status(&iface);
+
+        // 2. DNS-over-TLS actually enforced on the active link.
+        dot_on = field(&block, "Protocols:")
+            .map(|p| p.contains("+DNSOverTLS"))
+            .unwrap_or(false);
+        dot_on_known = true;
+        checks.push(LeakCheck::new(
+            "DNS-over-TLS enforced",
+            if dot_on { Severity::Ok } else { Severity::Leak },
+            if dot_on {
+                format!("{iface} uses encrypted DNS only")
+            } else {
+                format!("{iface} is resolving in plaintext")
+            },
+        ));
+
+        // 3. The router/gateway must not be one of the resolvers.
+        let servers = field_wrapped(&block, "DNS Servers:").unwrap_or_default();
+        let router_used = !gw.is_empty()
+            && servers
+                .split_whitespace()
+                .any(|s| s.split('#').next() == Some(gw.as_str()));
+        checks.push(LeakCheck::new(
+            "Router not used as resolver",
+            if router_used {
+                Severity::Leak
+            } else {
+                Severity::Ok
+            },
+            if router_used {
+                format!("gateway {gw} is still a configured DNS server")
+            } else if gw.is_empty() {
+                "no gateway detected".to_string()
+            } else {
+                format!("gateway {gw} is not resolving")
+            },
+        ));
     }
-
-    let block = link_status(&iface);
-
-    // 2. DNS-over-TLS actually enforced on the active link.
-    let dot_on = field(&block, "Protocols:")
-        .map(|p| p.contains("+DNSOverTLS"))
-        .unwrap_or(false);
-    checks.push(LeakCheck::new(
-        "DNS-over-TLS enforced",
-        if dot_on { Severity::Ok } else { Severity::Leak },
-        if dot_on {
-            format!("{iface} uses encrypted DNS only")
-        } else {
-            format!("{iface} is resolving in plaintext")
-        },
-    ));
-
-    // 3. The router/gateway must not be one of the resolvers.
-    let servers = field(&block, "DNS Servers:").unwrap_or("");
-    let router_used = !gw.is_empty()
-        && servers
-            .split_whitespace()
-            .any(|s| s.split('#').next() == Some(gw.as_str()));
-    checks.push(LeakCheck::new(
-        "Router not used as resolver",
-        if router_used {
-            Severity::Leak
-        } else {
-            Severity::Ok
-        },
-        if router_used {
-            format!("gateway {gw} is still a configured DNS server")
-        } else if gw.is_empty() {
-            "no gateway detected".to_string()
-        } else {
-            format!("gateway {gw} is not resolving")
-        },
-    ));
 
     // Generate a burst of traffic so transient sockets are visible, then
     // look for plaintext (53) and encrypted (853) connections.
@@ -495,10 +500,15 @@ pub fn leak_test(provider: &str) -> Vec<LeakCheck> {
             Severity::Warn,
             "DoT is enabled but no established port-853 connection was seen".to_string(),
         )
-    } else {
+    } else if dot_on_known {
         (
             Severity::Leak,
             "no encrypted DNS transport observed".to_string(),
+        )
+    } else {
+        (
+            Severity::Warn,
+            "no port-853 connection seen; default-route interface unknown".to_string(),
         )
     };
     checks.push(LeakCheck::new(

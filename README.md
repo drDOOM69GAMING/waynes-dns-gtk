@@ -46,15 +46,19 @@ firewall.
 
 The GUI has these actions:
 
-- **Test reachability**: does a real TLS handshake on port 853 and reports
-  which of the provider's servers actually answer. Dead servers are dropped
-  before anything is applied (e.g. `1.1.1.2` is blocked on some networks).
+- **Test reachability**: does a real TLS handshake on port 853 for every
+  server and reports which answered. Failures are explained in plain English
+  with the address family (`no IPv6 route`, `no usable IPv6 source address`,
+  `connection refused`, ...) and retried once. The result is advisory: a
+  server that did not answer is still written to the config, so a temporary
+  outage in one family does not drop that family's DNS. systemd-resolved fails
+  over to the family that is up.
 - **Speed test**: measures latency, download and upload speed. Prefers the
   official Ookla CLI when installed, so the numbers match speedtest.net (see
   below).
 - **Apply & Encrypt**: asks polkit for rights once, then:
   1. writes a `systemd-resolved` drop-in with `DNSOverTLS=yes` (no fallback),
-  2. sets the chosen DoT servers on the connection(s) with
+  2. sets every chosen DoT server, IPv4 and IPv6, on the connection(s) with
      `ipv4.ignore-auto-dns yes` / `ipv6.ignore-auto-dns yes`,
   3. optionally installs an `nftables` rule that blocks outbound port 53,
   4. verifies the result and automatically runs the **leak test**.
@@ -186,6 +190,24 @@ The `.desktop` entry assumes `waynes-dns-gtk` is on `PATH`.
 - `src/leak.rs`: the DNS leak test
 - `src/speedtest.rs`: the latency/download/upload speed test
 - `src/system.rs`: small process helpers
+
+## Changelog
+
+### v0.1.1
+- Fixed `default_route()` reading only the first line of `ip route show
+  default`, which produced a false `[WARN] Default route` in the leak test and
+  truncated the remaining checks.
+- The leak test no longer returns early when no default route is found.
+- The DoT probe now reports a plain-English, address-family aware reason for
+  each failure (`no IPv6 route`, `no usable IPv6 source address`, `connection
+  refused`, ...), retries a failed server once, and logs which families apply.
+- Apply now configures every IPv4 and IPv6 server, so a temporary IPv6 outage
+  no longer drops IPv6 DNS.
+- `--verify` now reads the full wrapped `DNS Servers:` field from `resolvectl`,
+  so IPv6 resolvers are shown.
+
+### v0.1.0
+- First public release.
 
 ## License
 

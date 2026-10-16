@@ -1,6 +1,6 @@
 [package]
 name = "waynes-dns-gtk"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "GTK4 UI to configure and verify DNS-over-TLS"
 license = "MIT"
