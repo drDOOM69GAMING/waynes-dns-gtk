@@ -191,6 +191,22 @@ The `.desktop` entry assumes `waynes-dns-gtk` is on `PATH`.
 - `src/speedtest.rs`: the latency/download/upload speed test
 - `src/system.rs`: small process helpers
 
+```sh
+INSTALL OOKLA SPEEDTEST
+
+Install using paru:
+
+paru -S ookla-speedtest-bin
+
+Alternatively, install using pacman:
+
+sudo pacman -S speedtest-cli
+
+Accept the license and GDPR agreement:
+
+speedtest --accept-license --accept-gdpr
+```
+
 ## Changelog
 
 ### v0.1.1
